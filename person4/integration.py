@@ -1,134 +1,248 @@
 import cv2
-import numpy as np
-import tkinter as tk
-from tkinter import filedialog
+import threading
+import queue
+import time
+import speech_recognition as sr
 
 from object1.main import detect_objects, answer_question
-from voice_assistant.voice import speak, extract_object_names
+from voice_assistant.voice import speak
 
 
-# =========================================================
-# DRAW OBJECT DETECTIONS
-# =========================================================
+# ==============================
+# VOICE COMMAND SYSTEM
+# ==============================
 
-def draw_detections(frame, detected_objects):
+command_queue = queue.Queue()
+running = True
+
+
+def listen_for_commands():
+    """
+    Continuously listens for voice commands.
+    Commands are placed into command_queue.
+    """
+
+    recognizer = sr.Recognizer()
+
+    try:
+        microphone = sr.Microphone()
+    except Exception as e:
+        print("Microphone error:", e)
+        return
+
+    with microphone as source:
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+
+    while running:
+
+        try:
+            with microphone as source:
+                audio = recognizer.listen(
+                    source,
+                    timeout=2,
+                    phrase_time_limit=5
+                )
+
+            command = recognizer.recognize_google(audio)
+
+            command = command.lower().strip()
+
+            if command:
+                command_queue.put(command)
+
+        except sr.WaitTimeoutError:
+            continue
+
+        except sr.UnknownValueError:
+            continue
+
+        except sr.RequestError:
+            continue
+
+        except Exception:
+            continue
+
+
+# ==============================
+# SPEECH
+# ==============================
+
+def say(text):
+    """
+    Speaks the answer.
+    No terminal answer is required.
+    """
+
+    try:
+        speak(text)
+    except Exception as e:
+        print("Voice error:", e)
+
+
+# ==============================
+# OBJECT SUMMARY
+# ==============================
+
+def create_scene_summary(detected_objects):
+
+    if not detected_objects:
+        return "I cannot detect any objects right now."
+
+    counts = {}
 
     for obj in detected_objects:
 
         name = obj["name"]
-        center_x = obj["center_x"]
-        center_y = obj["center_y"]
 
-        if "bbox" in obj:
+        if name in counts:
+            counts[name] += 1
+        else:
+            counts[name] = 1
 
-            x1, y1, x2, y2 = obj["bbox"]
+    parts = []
 
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
-            )
+    for name, count in counts.items():
 
-            cv2.putText(
-                frame,
-                name,
-                (x1, max(y1 - 10, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
-            )
+        if count == 1:
+            parts.append(f"one {name}")
+        else:
+            parts.append(f"{count} {name}s")
+
+    if len(parts) == 1:
+        return "I can see " + parts[0] + "."
+
+    if len(parts) == 2:
+        return "I can see " + parts[0] + " and " + parts[1] + "."
+
+    return "I can see " + ", ".join(parts[:-1]) + ", and " + parts[-1] + "."
+
+
+# ==============================
+# SCENE SIGNATURE
+# ==============================
+
+def get_scene_signature(detected_objects):
+
+    """
+    Creates a simple signature so the AI
+    does not speak the same detection every frame.
+    """
+
+    counts = {}
+
+    for obj in detected_objects:
+
+        name = obj["name"]
+
+        if name in counts:
+            counts[name] += 1
+        else:
+            counts[name] = 1
+
+    return tuple(sorted(counts.items()))
+
+
+# ==============================
+# VOICE QUESTION PROCESSING
+# ==============================
+
+def process_voice_command(command, detected_objects):
+
+    global running
+
+    print("Voice command received:", command)
+
+    # Stop commands
+
+    if (
+        "stop camera" in command
+        or "close camera" in command
+        or "quit camera" in command
+        or command == "exit"
+    ):
+
+        say("Stopping the camera.")
+
+        running = False
+
+        return "STOP"
+
+    # Scene commands
+
+    if (
+        "what do you see" in command
+        or "what can you see" in command
+        or "describe the scene" in command
+        or "what is around me" in command
+    ):
+
+        answer = create_scene_summary(detected_objects)
+
+        say(answer)
+
+        return "DONE"
+
+    # Person counting
+
+    if (
+        "how many people" in command
+        or "how many persons" in command
+        or "count people" in command
+        or "count persons" in command
+    ):
+
+        person_count = 0
+
+        for obj in detected_objects:
+
+            if obj["name"] == "person":
+                person_count += 1
+
+        if person_count == 0:
+            answer = "I cannot see any person."
+
+        elif person_count == 1:
+            answer = "I can see one person."
 
         else:
+            answer = f"I can see {person_count} persons."
 
-            cv2.putText(
-                frame,
-                name,
-                (center_x, center_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
-            )
+        say(answer)
 
+        return "DONE"
 
-# =========================================================
-# SPEAK ANSWER SAFELY
-# =========================================================
-
-def speak_answer(answer):
+    # Generic visual question
+    # Example:
+    # "What is on the left of laptop?"
 
     try:
 
-        speak(answer)
+        result = answer_question(
+            detected_objects,
+            command
+        )
 
-    except Exception as e:
+        answer = result["answer"]
 
-        print("Voice output error:", e)
+        say(answer)
 
+    except Exception:
 
-# =========================================================
-# ASK QUESTION
-# =========================================================
+        say(
+            "Sorry, I could not understand that visual question."
+        )
 
-def ask_question(detected_objects):
-
-    object_names = extract_object_names(detected_objects)
-
-    if object_names:
-
-        print("\nDetected:", ", ".join(object_names))
-
-    else:
-
-        print("\nNo objects detected.")
-
-    question = input(
-        "\nAsk your question: "
-    ).strip()
-
-    if not question:
-
-        print("\nNo question entered.")
-        return
-
-    result = answer_question(
-        detected_objects,
-        question
-    )
-
-    answer = result["answer"]
-
-    print("\nAnswer:")
-    print(answer)
-
-    # Speak every answer
-    speak_answer(answer)
+    return "DONE"
 
 
-# =========================================================
-# OPEN CAMERA
-# =========================================================
+# ==============================
+# CAMERA
+# ==============================
 
 def open_camera():
 
-    # Try DirectShow first with MJPG
-    cap = cv2.VideoCapture(
-        0,
-        cv2.CAP_DSHOW
-    )
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
-    if cap.isOpened():
-
-        # Request MJPG format
-        cap.set(
-            cv2.CAP_PROP_FOURCC,
-            cv2.VideoWriter_fourcc(*"MJPG")
-        )
-
-    # If DirectShow fails, try normal camera
     if not cap.isOpened():
 
         cap.release()
@@ -139,99 +253,138 @@ def open_camera():
 
         return None
 
-    # Camera resolution
-    cap.set(
-        cv2.CAP_PROP_FRAME_WIDTH,
-        1280
-    )
-
-    cap.set(
-        cv2.CAP_PROP_FRAME_HEIGHT,
-        720
-    )
-
-    # Try to keep normal colour capture
-    cap.set(
-        cv2.CAP_PROP_CONVERT_RGB,
-        1
-    )
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     return cap
 
 
-# =========================================================
+# ==============================
+# DRAW OBJECTS
+# ==============================
+
+def draw_detections(frame, detected_objects):
+
+    for obj in detected_objects:
+
+        name = obj["name"]
+        confidence = obj.get("confidence", 0)
+
+        x1, y1, x2, y2 = obj["bbox"]
+
+        label = f"{name} {confidence:.2f}"
+
+        cv2.rectangle(
+            frame,
+            (x1, y1),
+            (x2, y2),
+            (0, 255, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            label,
+            (x1, max(y1 - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
+
+
+# ==============================
 # LIVE CAMERA
-# =========================================================
+# ==============================
 
 def live_camera():
+
+    global running
+
+    running = True
 
     cap = open_camera()
 
     if cap is None:
 
-        print("\nError: Could not open camera.")
+        say("I could not open the camera.")
+
         return
 
-    print("\n================================")
-    print("LIVE CAMERA")
-    print("================================")
-    print("S = Scan current frame")
-    print("Q = Quit camera")
-    print("================================")
+    # Start voice listener
 
-    window_name = "VISION ASSIST AI - LIVE CAMERA"
-
-    cv2.namedWindow(
-        window_name,
-        cv2.WINDOW_NORMAL
+    listener_thread = threading.Thread(
+        target=listen_for_commands,
+        daemon=True
     )
 
-    cv2.resizeWindow(
-        window_name,
-        1100,
-        700
-    )
+    listener_thread.start()
 
-    while True:
+    say("Camera is now active. I am looking at the scene.")
+
+    previous_signature = None
+
+    last_announcement_time = 0
+
+    announcement_cooldown = 5
+
+    while running:
 
         ret, frame = cap.read()
 
         if not ret:
-
-            print("Could not read camera frame.")
             break
 
-        # Make sure frame is in normal BGR colour format
-        if len(frame.shape) == 2:
+        # ==========================
+        # YOLO DETECTION
+        # ==========================
 
-            frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_GRAY2BGR
-            )
-
-        elif frame.shape[2] == 4:
-
-            frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGRA2BGR
-            )
-
-        # Object detection
         detected_objects = detect_objects(frame)
 
-        # Copy for display
+        # ==========================
+        # DRAW DETECTIONS
+        # ==========================
+
         display_frame = frame.copy()
 
-        # Draw boxes
         draw_detections(
             display_frame,
             detected_objects
         )
 
-        # Instructions
+        # ==========================
+        # SCENE CHANGE DETECTION
+        # ==========================
+
+        current_signature = get_scene_signature(
+            detected_objects
+        )
+
+        current_time = time.time()
+
+        if (
+            current_signature != previous_signature
+            and current_time - last_announcement_time
+            > announcement_cooldown
+        ):
+
+            scene_description = create_scene_summary(
+                detected_objects
+            )
+
+            say(scene_description)
+
+            previous_signature = current_signature
+
+            last_announcement_time = current_time
+
+        # ==========================
+        # CAMERA WINDOW
+        # ==========================
+
         cv2.putText(
             display_frame,
-            "S = SCAN    Q = QUIT",
+            "VOICE MODE ACTIVE",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.9,
@@ -239,30 +392,47 @@ def live_camera():
             2
         )
 
-        # Show camera
+        cv2.putText(
+            display_frame,
+            "Speak your question | Say STOP CAMERA to exit",
+            (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2
+        )
+
         cv2.imshow(
-            window_name,
+            "VISION ASSIST AI",
             display_frame
         )
 
-        key = cv2.waitKey(1) & 0xFF
+        # ==========================
+        # VOICE COMMAND PROCESSING
+        # ==========================
 
-        # Scan current frame
-        if key == ord("s"):
+        while not command_queue.empty():
 
-            print("\n--------------------------------")
-            print("Frame scanned.")
-            print("--------------------------------")
+            command = command_queue.get()
 
-            ask_question(
+            result = process_voice_command(
+                command,
                 detected_objects
             )
 
-            print("\nCamera resumed.")
-            print("Press S to scan again or Q to quit.")
+            if result == "STOP":
 
-        # Quit
-        elif key == ord("q"):
+                running = False
+
+                break
+
+        # Emergency keyboard exit only
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q"):
+
+            running = False
 
             break
 
@@ -270,152 +440,13 @@ def live_camera():
 
     cv2.destroyAllWindows()
 
-    print("\nLive Camera Stopped.")
+    say("Camera stopped.")
 
 
-# =========================================================
-# SELECT IMAGE
-# =========================================================
-
-def select_image():
-
-    root = tk.Tk()
-    root.withdraw()
-
-    image_path = filedialog.askopenfilename(
-
-        title="Select an Image",
-
-        filetypes=[
-            (
-                "Image Files",
-                "*.jpg *.jpeg *.png *.JPG *.JPEG *.PNG"
-            ),
-            (
-                "All Files",
-                "*.*"
-            )
-        ]
-    )
-
-    root.destroy()
-
-    if not image_path:
-
-        print("\nNo image selected.")
-        return
-
-    print("\nImage selected.")
-
-    try:
-
-        image = cv2.imdecode(
-            np.fromfile(
-                image_path,
-                dtype=np.uint8
-            ),
-            cv2.IMREAD_COLOR
-        )
-
-    except Exception as e:
-
-        print("\nError reading image:")
-        print(e)
-        return
-
-    if image is None:
-
-        print("\nCould not open selected image.")
-        return
-
-    # Object detection
-    detected_objects = detect_objects(image)
-
-    # Draw detections
-    display_image = image.copy()
-
-    draw_detections(
-        display_image,
-        detected_objects
-    )
-
-    window_name = "VISION ASSIST AI - SELECTED IMAGE"
-
-    cv2.namedWindow(
-        window_name,
-        cv2.WINDOW_NORMAL
-    )
-
-    cv2.resizeWindow(
-        window_name,
-        1100,
-        700
-    )
-
-    cv2.imshow(
-        window_name,
-        display_image
-    )
-
-    print("\nImage detection complete.")
-    print("Press any key on the image window to continue.")
-
-    cv2.waitKey(0)
-
-    cv2.destroyAllWindows()
-
-    # Ask question
-    ask_question(
-        detected_objects
-    )
-
-
-# =========================================================
-# MAIN MENU
-# =========================================================
-
-def main():
-
-    while True:
-
-        print("\n")
-        print("========================================")
-        print("          VISION ASSIST AI")
-        print("========================================")
-        print("1. Live Camera")
-        print("2. Select Image")
-        print("3. Exit")
-        print("========================================")
-
-        choice = input(
-            "Enter your choice: "
-        ).strip()
-
-        if choice == "1":
-
-            live_camera()
-
-        elif choice == "2":
-
-            select_image()
-
-        elif choice == "3":
-
-            print("\nVision Assist AI Closed.")
-            break
-
-        else:
-
-            print(
-                "\nInvalid choice. "
-                "Please enter 1, 2 or 3."
-            )
-
-
-# =========================================================
-# START PROGRAM
-# =========================================================
+# ==============================
+# MAIN
+# ==============================
 
 if __name__ == "__main__":
 
-    main()
+    live_camera()
